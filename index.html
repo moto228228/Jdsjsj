@@ -1,0 +1,285 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Фонарщик глубин</title>
+<style>
+html{color-scheme:dark}
+body{margin:0;height:100dvh!important}
+/* layout: игровой экран сверху, сенсорные кнопки снизу */
+:root{--bg:#0d1417;--panel:#17242a;--fg:#dce8e4;--mute:#8aa3a0;--glow:#ffc45c;color-scheme:dark}
+html,body{height:100%}
+body{background:var(--bg);color:var(--fg);font-family:system-ui,sans-serif;display:flex;flex-direction:column;gap:10px;box-sizing:border-box;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));padding-block:10px;user-select:none;-webkit-user-select:none;overflow:hidden}
+h1{font:600 18px Georgia,serif;margin:0;color:var(--glow);text-align:center}
+#wrap{flex:1;min-height:0;position:relative}
+canvas{position:absolute;inset:0;width:100%;height:100%;display:block;border-radius:6px}
+#pad{display:flex;justify-content:space-between;gap:8px;touch-action:none}
+.grp{display:flex;gap:6px;align-items:flex-end}
+button{background:var(--panel);color:var(--fg);border:1px solid #35505a;border-radius:12px;min-width:0;width:15vw;max-width:68px;height:60px;font-size:13px;touch-action:none;padding:0}
+button.on{background:#35505a}
+button:focus-visible{outline:2px solid var(--glow)}
+.arrow{font-size:22px}
+p{margin:0;font-size:12px;color:var(--mute);text-align:center}
+@media (max-width:420px){.grp{gap:4px}button{width:13.5vw}}
+</style>
+</head>
+<body>
+<h1>Фонарщик глубин</h1>
+<div id="wrap"><canvas id="c" aria-label="Игровое поле"></canvas></div>
+<div id="pad">
+ <div class="grp"><button class="arrow" data-k="left" aria-label="Влево">◀</button><button class="arrow" data-k="right" aria-label="Вправо">▶</button></div>
+ <div class="grp"><button data-k="heal">Лечить</button><button data-k="dash">Рывок</button><button data-k="hit">Удар</button><button data-k="jump">Прыжок</button></div>
+</div>
+<p>Клавиши: ← → или A D — идти, пробел — прыжок, J или X — удар, K или Shift — рывок, H — лечение, Enter — начать</p>
+<script>
+const cv=document.getElementById('c'),g=cv.getContext('2d');
+const T=32,H=12;
+let VW=640,VH=H*T;
+const keys={},prev={};
+const map={ArrowLeft:'left',KeyA:'left',ArrowRight:'right',KeyD:'right',Space:'jump',KeyW:'jump',ArrowUp:'jump',KeyJ:'hit',KeyX:'hit',KeyK:'dash',ShiftLeft:'dash',KeyC:'dash',KeyH:'heal',Enter:'start'};
+addEventListener('keydown',e=>{const k=map[e.code];if(k){keys[k]=true;e.preventDefault()}});
+addEventListener('keyup',e=>{const k=map[e.code];if(k)keys[k]=false});
+addEventListener('blur',()=>{for(const k in keys)keys[k]=false});
+document.querySelectorAll('button').forEach(b=>{
+ const set=v=>{keys[b.dataset.k]=v;b.classList.toggle('on',v)};
+ b.addEventListener('pointerdown',e=>{e.preventDefault();b.setPointerCapture(e.pointerId);set(true)});
+ ['pointerup','pointercancel','lostpointercapture'].forEach(n=>b.addEventListener(n,()=>set(false)));
+ b.addEventListener('contextmenu',e=>e.preventDefault());
+});
+cv.addEventListener('pointerdown',()=>{if(state!=='play')keys.tap=true});
+
+const ZONES=[
+ {name:'Глава 1. Затопленные кельи',sky:'#10232b',rock:'#2c4a52',edge:'#6fa7a0',w:80,
+  pits:[[12,3],[24,3],[48,6],[62,6]],
+  plats:[[17,8,3],[29,8,3],[34,6,4],[73,7,3]],
+  crawl:[20,31,40,57,72],fly:[[36,4],[66,5]],
+  item:{x:43,kind:'dash',text:'Получен рывок. Прыгните и нажмите «Рывок», чтобы перелететь пропасть.'}},
+ {name:'Глава 2. Ржавые сады',sky:'#241a18',rock:'#5a3a2e',edge:'#d08a55',w:84,
+  pits:[[14,6],[28,3],[58,6],[70,5]],
+  plats:[[21,8,3],[34,7,4],[76,7,3]],
+  walls:[[48,5,3]],
+  crawl:[9,24,38,54,67,79],fly:[[18,4],[32,4],[56,3],[73,4]],
+  item:{x:42,kind:'double',text:'Получен двойной прыжок. Нажмите «Прыжок» ещё раз в воздухе.'}},
+ {name:'Глава 3. Колокольная бездна',sky:'#1a1630',rock:'#3a3260',edge:'#a193e0',w:56,
+  pits:[[8,6],[19,7]],plats:[[30,7,2]],crawl:[16,29],fly:[[11,4],[22,4]],boss:true}
+];
+let state='title',zi=0,Z,grid,P,foes,shots,parts,item,boss,msg='',msgT=0,cam=0,frame=0,shake=0,abil={dash:false,double:false},deaths=0;
+
+function load(i){
+ zi=i;Z=ZONES[i];
+ grid=Array.from({length:H},(_,y)=>Array.from({length:Z.w},(_,x)=>(y>=10||x===0||x===Z.w-1)?1:0));
+ for(const [x,w] of Z.pits)for(let k=x;k<x+w;k++){grid[10][k]=0;grid[11][k]=2}
+ for(const [x,y,w] of Z.plats)for(let k=x;k<x+w;k++)grid[y][k]=1;
+ for(const [x,y,w] of Z.walls||[])for(let k=x;k<x+w;k++)for(let r=y;r<10;r++)grid[r][k]=1;
+ P={x:2*T,y:8*T,w:18,h:28,vx:0,vy:0,f:1,on:false,coy:0,buf:0,dashT:0,dashCd:0,air:false,jumps:0,atk:0,atkCd:0,inv:60,hp:5,light:0,heal:0,sx:2*T,sy:8*T};
+ foes=Z.crawl.map(x=>({type:'crawl',x:x*T,y:10*T-20,w:28,h:20,vx:1,hp:2,hit:0}))
+  .concat(Z.fly.map(([x,y])=>({type:'fly',x:x*T,y:y*T,bx:x*T,by:y*T,w:22,h:22,vx:0,vy:0,hp:2,hit:0})));
+ shots=[];parts=[];
+ item=Z.item&&!abil[Z.item.kind]?{x:Z.item.x*T,y:8*T,w:24,h:2*T}:null;
+ boss=Z.boss?{x:47*T,y:10*T-88,w:72,h:88,vx:0,vy:0,hp:30,max:30,mode:'sleep',t:0,hit:0,f:-1}:null;
+ cam=0;msg=Z.name;msgT=150;
+}
+const tile=(x,y)=>{const c=Math.floor(x/T),r=Math.floor(y/T);if(c<0||c>=Z.w)return 1;if(r<0||r>=H)return 0;return grid[r][c]};
+function solidBox(x,y,w,h){
+ for(let yy=y;;yy+=T/2){const py=Math.min(yy,y+h-.01);
+  for(let xx=x;;xx+=T/2){const px=Math.min(xx,x+w-.01);if(tile(px,py)===1)return true;if(xx>=x+w-.01)break}
+  if(yy>=y+h-.01)break}
+ return false;
+}
+function move(o){
+ let hitX=false;o.on=false;
+ let n=Math.ceil(Math.abs(o.vx)/4);for(let i=0;i<n;i++){const s=o.vx/n;if(solidBox(o.x+s,o.y,o.w,o.h)){hitX=true;break}o.x+=s}
+ n=Math.ceil(Math.abs(o.vy)/4);for(let i=0;i<n;i++){const s=o.vy/n;if(solidBox(o.x,o.y+s,o.w,o.h)){if(s>0){o.on=true;o.y=Math.floor((o.y+o.h+s)/T)*T-o.h}o.vy=0;break}o.y+=s}
+ return hitX;
+}
+const over=(a,b)=>a.x<b.x+b.w&&a.x+a.w>b.x&&a.y<b.y+b.h&&a.y+a.h>b.y;
+function burst(x,y,col,n){for(let i=0;i<n;i++)parts.push({x,y,vx:(Math.random()-.5)*6,vy:(Math.random()-.7)*5,t:30,col})}
+function hurt(fromX){
+ if(P.inv>0||state!=='play')return;
+ P.hp--;P.inv=70;P.heal=0;shake=10;P.vx=P.x<fromX?-5:5;P.vy=-5;burst(P.x+9,P.y+14,'#ffc45c',14);
+ if(P.hp<=0){state='dead';deaths++}
+}
+const pressed=k=>keys[k]&&!prev[k];
+
+function update(){
+ frame++;
+ if(state!=='play'){
+  if(pressed('start')||pressed('tap')||pressed('jump')){
+   if(state==='title'||state==='win'){abil={dash:false,double:false};deaths=0;load(0)}else load(zi);
+   state='play';
+  }
+  keys.tap=false;Object.assign(prev,keys);return;
+ }
+ const p=P;
+ if(msgT>0)msgT--;if(shake>0)shake--;
+ if(p.inv>0)p.inv--;if(p.dashCd>0)p.dashCd--;if(p.atkCd>0)p.atkCd--;if(p.atk>0)p.atk--;
+ const dir=(keys.right?1:0)-(keys.left?1:0);
+ if(dir&&p.dashT<=0)p.f=dir;
+ p.coy=p.on?8:p.coy-1;if(p.on){p.jumps=0;p.air=false}
+ p.buf=pressed('jump')?8:p.buf-1;
+ const healing=keys.heal&&p.on&&p.light>=3&&p.hp<5;
+ p.heal=healing?p.heal+1:0;
+ if(p.heal>=50){p.hp++;p.light-=3;p.heal=0;burst(p.x+9,p.y+10,'#fff0c0',18)}
+ if(p.inv<55)p.vx=healing?0:dir*3.6;
+ if(p.buf>0){
+  if(p.coy>0){p.vy=-10;p.coy=0;p.buf=0}
+  else if(abil.double&&p.jumps<1){p.vy=-9;p.jumps++;p.buf=0;burst(p.x+9,p.y+28,'#a193e0',8)}
+ }
+ if(!keys.jump&&prev.jump&&p.vy<-4)p.vy=-4;
+ if(pressed('dash')&&abil.dash&&p.dashCd<=0&&!p.air){p.dashT=12;p.dashCd=30;if(!p.on)p.air=true}
+ if(p.dashT>0){p.dashT--;p.vx=p.f*9;p.vy=0;parts.push({x:p.x+9,y:p.y+14,vx:0,vy:0,t:12,col:'#ffc45c'})}
+ else p.vy=Math.min(p.vy+.5,10);
+ if(pressed('hit')&&p.atkCd<=0){p.atk=10;p.atkCd=20;p.swing=(p.swing||0)+1}
+ move(p);
+ const reach={x:p.f>0?p.x+p.w:p.x-40,y:p.y-4,w:40,h:p.h+8};
+ // сохраняем безопасную точку только там, где под ногами есть запас
+ if(p.on&&tile(p.x-T,p.y+p.h+2)===1&&tile(p.x+p.w+T,p.y+p.h+2)===1){p.sx=p.x;p.sy=p.y}
+ if(tile(p.x+9,p.y+p.h-2)===2||p.y>H*T){
+  p.inv=0;hurt(p.x);
+  if(state==='play'){p.x=p.sx;p.y=p.sy;p.vx=p.vy=0;p.dashT=0}
+ }
+ if(item&&over(p,item)){abil[Z.item.kind]=true;msg=Z.item.text;msgT=360;burst(item.x+12,item.y+30,'#fff0c0',40);item=null}
+
+ for(const e of foes){
+  if(e.hit>0)e.hit--;
+  const near=Math.abs(e.x-p.x)<520;
+  if(!near)continue;
+  if(e.type==='crawl'){
+   const ahead=e.vx>0?e.x+e.w+2:e.x-2;
+   if(tile(ahead,e.y+e.h+2)!==1||tile(ahead,e.y+e.h/2)===1)e.vx*=-1;
+   e.x+=e.vx;
+  }else{
+   const seek=Math.hypot(p.x-e.x,p.y-e.y)<190;
+   const tx=seek?p.x:e.bx,ty=seek?p.y:e.by+Math.sin(frame/30)*16;
+   e.vx=(e.vx+Math.sign(tx-e.x)*.08)*.96;e.vy=(e.vy+Math.sign(ty-e.y)*.08)*.96;e.x+=e.vx;e.y+=e.vy;
+  }
+  if(p.atk>0&&e.last!==p.swing&&over(reach,e)){
+   e.last=p.swing;e.hp--;e.hit=10;p.light=Math.min(9,p.light+1);e.vx=e.type==='fly'?p.f*4:e.vx;burst(e.x+e.w/2,e.y+e.h/2,'#dce8e4',8);
+  }
+  if(e.hp>0&&e.hit<=0&&over(p,e))hurt(e.x+e.w/2);
+ }
+ foes=foes.filter(e=>e.hp>0);
+
+ if(boss)updateBoss(p,reach);
+ for(const s of shots){s.x+=s.vx;s.y+=s.vy;if(over(p,s))hurt(s.x);if(tile(s.x+s.w/2,s.y+s.h)===1)s.dead=true;if(s.life&&--s.life<=0)s.dead=true}
+ shots=shots.filter(s=>!s.dead&&s.y<H*T);
+ for(const q of parts){q.x+=q.vx;q.y+=q.vy;q.vy+=.15*(q.vx?1:0);q.t--}
+ parts=parts.filter(q=>q.t>0);
+
+ if(!boss&&!Z.boss&&p.x>(Z.w-3)*T){load(zi+1)}
+ Object.assign(prev,keys);
+}
+function updateBoss(p,reach){
+ const b=boss;b.t++;if(b.hit>0)b.hit--;
+ if(b.mode==='sleep'){if(p.x>35*T){b.mode='wait';b.t=0;msg='Погасший Колокол';msgT=120}return}
+ const rage=b.hp<b.max/2;
+ if(b.mode==='wait'){b.vx=0;b.f=p.x<b.x?-1:1;
+  if(b.t>(rage?35:55)){b.mode=['charge','leap','rain'][Math.floor(Math.random()*3)];b.t=0;if(b.mode==='leap'){b.vy=-12;b.vx=Math.max(-6,Math.min(6,(p.x-b.x-27)/48))}}}
+ else if(b.mode==='charge'){if(b.t>30)b.vx=b.f*(rage?7:5.5);else shake=2}
+ else if(b.mode==='rain'){
+  if(b.t%(rage?10:15)===0&&b.t<80)shots.push({x:p.x+(Math.random()-.5)*160,y:0,w:10,h:18,vx:0,vy:4.5});
+  if(b.t>100){b.mode='wait';b.t=0}}
+ b.vy=Math.min(b.vy+.5,11);
+ const wall=move(b);
+ if(b.x<32*T){b.x=32*T;if(b.mode==='charge'){b.mode='wait';b.t=0;shake=12}}
+ if(b.mode==='charge'&&wall&&b.t>30){b.mode='wait';b.t=0;shake=12}
+ if(b.mode==='leap'&&b.on&&b.t>5){
+  b.mode='wait';b.t=0;shake=14;
+  for(const d of [-1,1])shots.push({x:b.x+b.w/2,y:10*T-18,w:18,h:16,vx:d*4.5,vy:0,life:70});
+ }
+ if(p.atk>0&&b.last!==p.swing&&over(reach,b)){b.last=p.swing;b.hp--;b.hit=8;p.light=Math.min(9,p.light+1);burst(p.f>0?b.x:b.x+b.w,p.y+10,'#ffc45c',10)}
+ if(over(p,{x:b.x+8,y:b.y+8,w:b.w-16,h:b.h-8}))hurt(b.x+b.w/2);
+ if(b.hp<=0){burst(b.x+36,b.y+44,'#ffc45c',80);boss=null;shots=[];state='win'}
+}
+
+function ell(x,y,rx,ry,c){g.fillStyle=c;g.beginPath();g.ellipse(x,y,rx,ry,0,0,7);g.fill()}
+function glow(x,y,r,c){const q=g.createRadialGradient(x,y,0,x,y,r);q.addColorStop(0,c);q.addColorStop(1,'transparent');g.fillStyle=q;g.fillRect(x-r,y-r,r*2,r*2)}
+function drawHero(){
+ const p=P;if(p.inv>0&&frame%8<4)return;
+ const x=p.x+9,y=p.y;
+ glow(x,y+8,70,'rgba(255,196,92,.28)');
+ g.fillStyle='#3d6670';g.beginPath();g.moveTo(x-6,y+13);g.lineTo(x+6,y+13);g.lineTo(x+11-p.f*3,y+28);g.lineTo(x-11-p.f*3,y+28);g.fill();
+ // голова-фонарь
+ g.fillStyle='#b98a45';g.fillRect(x-9,y-1,18,3);g.fillRect(x-7,y+13,14,3);
+ g.strokeStyle='#b98a45';g.lineWidth=2;g.beginPath();g.arc(x,y-2,4,Math.PI,0);g.stroke();
+ g.fillStyle='#ffd98a';g.fillRect(x-7,y+2,14,11);
+ g.fillStyle='#3a2410';g.fillRect(x+p.f*3-3,y+5,2,4);g.fillRect(x+p.f*3+2,y+5,2,4);
+ if(p.atk>0){g.strokeStyle='#fff0c0';g.lineWidth=4;g.beginPath();const a=p.f>0?0:Math.PI;g.arc(x+p.f*10,y+14,30,a-1,a+1);g.stroke()}
+ if(p.heal>0){g.strokeStyle='#fff0c0';g.lineWidth=2;g.beginPath();g.arc(x,y+14,24,0,p.heal/50*6.28);g.stroke()}
+}
+function text(s,x,y,size,col,align='center'){g.font=`${size}px Georgia,serif`;g.fillStyle=col;g.textAlign=align;g.fillText(s,x,y)}
+function wrapText(s,y,size,col){
+ g.font=`${size}px Georgia,serif`;let line='';const max=VW-40;
+ for(const w of s.split(' ')){const t=line?line+' '+w:w;if(g.measureText(t).width>max&&line){text(line,VW/2,y,size,col);y+=size*1.4;line=w}else line=t}
+ text(line,VW/2,y,size,col);return y+size*1.4;
+}
+function draw(){
+ const dpr=Math.min(devicePixelRatio||1,2),cw=cv.clientWidth,ch=cv.clientHeight;
+ if(!cw||!ch)return;
+ if(cv.width!==Math.round(cw*dpr)||cv.height!==Math.round(ch*dpr)){cv.width=Math.round(cw*dpr);cv.height=Math.round(ch*dpr)}
+ const scale=Math.min(ch/VH,cw/384);
+ VW=Math.min(cw/scale,900);
+ const ox=(cw-VW*scale)/2,oy=(ch-VH*scale)/2;
+ g.setTransform(1,0,0,1,0,0);g.fillStyle='#05090b';g.fillRect(0,0,cv.width,cv.height);
+ g.setTransform(scale*dpr,0,0,scale*dpr,ox*dpr,oy*dpr);
+ g.save();g.beginPath();g.rect(0,0,VW,VH);g.clip();
+ g.fillStyle=Z.sky;g.fillRect(0,0,VW,VH);
+ let aim=P.x-VW*(P.f>0?.4:.6);if(boss&&boss.mode!=="sleep")aim=Math.max(P.x-VW+50,Math.min(P.x-30,(P.x+boss.x+54)/2-VW/2));const target=Math.max(0,Math.min(Z.w*T-VW,aim));
+ cam+=(target-cam)*.12;
+ g.fillStyle='rgba(0,0,0,.28)';
+ for(let i=-1;i<VW/110+2;i++){const k=i+Math.floor(cam*.3/110),x=k*110-cam*.3,h=60+((k*73)%90+90)%90;g.fillRect(x+20,0,26,h*.8);g.beginPath();g.ellipse(x+75,VH,42,h*1.6,0,Math.PI,0);g.fill()}
+ g.save();g.translate(-Math.round(cam)+(shake?(Math.random()-.5)*shake*.6:0),0);
+ const c0=Math.max(0,Math.floor(cam/T)-1),c1=Math.min(Z.w,c0+Math.ceil(VW/T)+3);
+ for(let r=0;r<H;r++)for(let c=c0;c<c1;c++){
+  const v=grid[r][c],x=c*T,y=r*T;
+  if(v===1){g.fillStyle=Z.rock;g.fillRect(x,y,T+.5,T+.5);if(r>0&&grid[r-1][c]!==1){g.fillStyle=Z.edge;g.fillRect(x,y,T+.5,4)}}
+  if(v===2){g.fillStyle='#d9e2e0';for(let i=0;i<2;i++){g.beginPath();g.moveTo(x+i*16,y+T);g.lineTo(x+i*16+8,y+8);g.lineTo(x+i*16+16,y+T);g.fill()}}
+ }
+ if(!Z.boss){const x=(Z.w-3)*T;glow(x+16,9*T,60,'rgba(255,240,192,.5)');g.fillStyle='#fff0c0';g.fillRect(x+6,8*T,20,2*T)}
+ if(item){const y=item.y+28+Math.sin(frame/20)*6;glow(item.x+12,y,40,'rgba(255,240,192,.8)');g.fillStyle='#fff';g.save();g.translate(item.x+12,y);g.rotate(frame/40);g.fillRect(-7,-7,14,14);g.restore()}
+ for(const e of foes){
+  const x=e.x+e.w/2,y=e.y+e.h/2,c=e.hit>0?'#fff':'#0a0d10';
+  if(e.type==='crawl'){ // чернильная клякса
+   const s=Math.sin(frame/8+e.x/20)*2;ell(x,y+2-s/2,15,9+s,c);ell(x-8,y+8,6,3,c);ell(x+9,y+8,5,3,c);
+  }else{ // сорвавшаяся искра
+   glow(x,y,26,'rgba(255,80,110,.5)');g.fillStyle=c;g.beginPath();g.moveTo(x,y-14);g.lineTo(x+11,y);g.lineTo(x,y+14);g.lineTo(x-11,y);g.fill();
+  }
+  ell(x-5,y,2.5,2.5,'#ff5a72');ell(x+5,y,2.5,2.5,'#ff5a72');
+ }
+ if(boss){
+  const b=boss,x=b.x+36,y=b.y,c=b.hit>0?'#fff':(b.mode==='charge'&&b.t<=30&&frame%6<3?'#b0524a':'#6d5a3c');
+  g.fillStyle=c;g.beginPath();g.moveTo(x-40,y+88);g.quadraticCurveTo(x-26,y+70,x-27,y+34);g.quadraticCurveTo(x-24,y+4,x,y+4);g.quadraticCurveTo(x+24,y+4,x+27,y+34);g.quadraticCurveTo(x+26,y+70,x+40,y+88);g.fill();
+  g.fillRect(x-7,y-4,14,10);
+  g.strokeStyle='#120e1c';g.lineWidth=3;g.beginPath();g.moveTo(x+8,y+8);g.lineTo(x-2,y+30);g.lineTo(x+10,y+44);g.lineTo(x+3,y+62);g.stroke();
+  if(b.mode!=='sleep'){ell(x-11+b.f*6,y+38,5,7,'#a8f0ff');ell(x+11+b.f*6,y+38,5,7,'#a8f0ff')}
+ }
+ for(const s of shots){glow(s.x+s.w/2,s.y+s.h/2,22,'rgba(168,240,255,.7)');ell(s.x+s.w/2,s.y+s.h/2,s.w/2,s.h/2,'#a8f0ff')}
+ for(const q of parts){g.globalAlpha=Math.min(1,q.t/20);g.fillStyle=q.col;g.fillRect(q.x-2,q.y-2,4,4)}
+ g.globalAlpha=1;drawHero();g.restore();
+ for(let i=0;i<5;i++){ell(20+i*22,22,8,8,i<P.hp?'#ffc45c':'rgba(255,255,255,.15)')}
+ for(let i=0;i<9;i++){g.fillStyle=i<P.light?'#fff0c0':'rgba(255,255,255,.15)';g.fillRect(12+i*12+Math.floor(i/3)*4,38,9,5)}
+ if(boss&&boss.mode!=='sleep'){g.fillStyle='rgba(0,0,0,.5)';g.fillRect(VW*.2,VH-22,VW*.6,8);g.fillStyle='#a193e0';g.fillRect(VW*.2,VH-22,VW*.6*boss.hp/boss.max,8)}
+ if(msgT>0&&state==='play')wrapText(msg,70,17,'#fff0c0');
+ if(state!=='play'){
+  g.fillStyle='rgba(5,9,11,.84)';g.fillRect(0,0,VW,VH);
+  let y=100;
+  if(state==='title'){
+   y=wrapText('Фонарщик глубин',y,34,'#ffc45c')+10;
+   y=wrapText('Пройдите три главы и зажгите погасший колокол. Удары наполняют свет; три деления света восстанавливают одну жизнь, если стоять и держать «Лечить».',y,16,'#dce8e4')+20;
+  }else if(state==='dead'){y=wrapText('Огонь погас',140,30,'#ff8a7a')+20}
+  else{y=wrapText('Колокол снова звучит',120,28,'#ffc45c')+10;y=wrapText('Вы прошли игру. Падений: '+deaths,y,17,'#dce8e4')+20}
+  wrapText(state==='dead'?'Коснитесь экрана, чтобы начать главу заново':'Коснитесь экрана или нажмите Enter',y,15,'#8aa3a0');
+ }
+ g.restore();
+}
+let last=0,acc=0;
+function loop(t){
+ acc+=Math.min(100,t-last);last=t;
+ while(acc>=1000/60){update();acc-=1000/60}
+ draw();requestAnimationFrame(loop);
+}
+load(0);requestAnimationFrame(loop);
+</script>
+</body>
+</html>
